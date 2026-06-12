@@ -1,0 +1,232 @@
+## Contestualizzazione
+
+Alla fine della Parte 2 il duello fra `armitage` e `molly` girava già incapsulato: attributi privati, getter, setter con validazione, niente più `runner.integrity = 9999` a bucare lo stato dall’esterno. Funzionava, ma l’interfaccia era goffa: `runner.get_integrity()`, `ice.set_min_damage(...)`, una sfilza di metodi che in Python idiomatico non scrive più nessuno dal 2010 circa.
+
+In questa Parte 3 rendiamo il sistema più **robusto**, più **autonomo** e soprattutto più **pythonico**:
+
+- rifiniamo `Runner` e `Icebreaker` sostituendo i getter/setter espliciti con `@property` e setter dedicati;
+- introduciamo i **chip**: moduli hardware monouso che il Runner innesta nel cyberdeck per ripararsi l’integrità o spingere temporaneamente le proprie statistiche oltre i limiti di fabbrica;
+- facciamo sì che ogni `Runner` **decida da solo** se bruciare un chip prima di attaccare, con `should_use_chip()`.
+
+Una precisazione che vale oro in fase di interrogazione: di `should_use_chip()` non valutiamo la *strategia vincente* (non esiste una mossa ottima universale), ma il **processo decisionale** — quali segnali leggi, con quali soglie decidi, come lo dimostri con qualche test mirato.
+
+---
+
+## Obiettivo
+
+Trasformare le classi della Parte 2 in versioni con `@property` e metodi privati, introdurre la classe `Chip` e implementare la logica con cui un `Runner` sceglie autonomamente quando usarne uno.
+
+---
+
+## Novità rispetto alle parti precedenti
+
+1. **`Chip`**: una nuova classe che rappresenta un modulo hardware monouso, con quattro caratteristiche — nome, tipo di effetto, ammontare e durata in turni.
+2. **Schema UML**: produci con uno strumento online (l’editor di diagrammi di draw.io, oppure Mermaid) uno schema UML delle classi del progetto.
+3. **Relazione**: oltre al codice sorgente, consegna una relazione minimale ma completa in cui riporti e commenti lo schema UML e documenti le scelte di progetto per `should_use_chip()` (vedi sotto).
+
+---
+
+## Specifiche delle classi
+
+### `Chip` (nuovo file `chip.py`)
+
+La classe `Chip` rappresenta un **modulo hardware monouso** che un Runner innesta nel cyberdeck durante un netrun per ottenere un vantaggio. Ogni chip ha un **nome**, un **tipo di effetto**, un **ammontare** che ne determina l’intensità e una **durata** espressa in turni. Una volta innestato, il chip si **brucia**: non è riutilizzabile.
+
+I chip hanno tre tipi di effetto:
+
+- `"repair"`: ripristina istantaneamente l’integrità del Runner;
+- `"overclock"`: spinge temporaneamente la **potenza** (`power`) per un certo numero di turni;
+- `"sharpen"`: affina temporaneamente la **finezza** (`finesse`) per un certo numero di turni.
+
+Quando un chip viene innestato tramite il metodo `apply_to()`, applica il suo effetto al Runner target e restituisce un dizionario con le informazioni sull’effetto, utile per generare i messaggi di log durante la simulazione.
+
+**Attributi privati**
+
+- `__name: str`
+- `__effect: str` → valori ammessi: `"repair" | "overclock" | "sharpen"`
+- `__amount: int` (≥ 1)
+- `__duration: int` (≥ 0) — se `0` l’effetto è istantaneo, altrimenti dura quel numero di turni. I chip di riparazione sono **sempre** istantanei.
+
+**Property (con validazione)**
+
+- `name` (non vuoto)
+- `effect` (solo valori ammessi)
+- `amount` (≥ 1)
+- `duration` (≥ 0)
+
+**Metodi pubblici**
+
+- `apply_to(self, target) -> dict`: il chip **decide** cosa fare e applica l’effetto al **target**.
+    - Richiede che il `target` esponga i metodi:
+        - `heal(amount: int) -> int` — usato quando il chip è di riparazione;
+        - `add_buff(stat: str, amount: int, duration: int) -> None` — usato quando il chip potenzia una statistica (*overclock* o *sharpen*).
+
+        Un modo semplice per verificarlo con le conoscenze attuali è combinare `hasattr()` e `callable()`. Per esempio:
+
+        ```python
+        if hasattr(node, "reboot") and callable(getattr(node, "reboot")):
+            node.reboot()
+        else:
+            print("Il target non espone un metodo 'reboot' richiamabile.")
+        ```
+
+    - Se il chip è già stato bruciato, stampa un errore e restituisce `{"error": "already_burned"}`.
+    - Se il target non espone i metodi richiesti, stampa un errore e restituisce `{"error": "unsupported_target"}`.
+    - In caso di successo restituisce un log, ad es. `{"effect": "repair", "amount": 10, "duration": 0}`.
+- `__str__`: descrizione dell’oggetto, ad es. `Chip(repair +10)` oppure `Chip(overclock +2 x3t)`.
+
+**Metodi privati (suggeriti)**
+
+Servono ad alleggerire `apply_to()` e devono perciò essere richiamabili solo dall’interno della classe.
+
+- `__apply_repair(self, target) -> int`
+- `__apply_boost(self, target, stat) -> int`
+
+---
+
+### `Runner` (refactor in `runner.py`)
+
+**Attributi privati**
+
+- `__handle`, `__max_integrity`, `__integrity`, `__power`, `__finesse`, `__icebreaker`
+- `__buffs: list[tuple[str, int, int]]` → conserva i potenziamenti attivi: ogni tupla è `(statistica, bonus, turni_rimanenti)`, es. `[("power", 2, 3), ("finesse", 2, 1)]`
+- `__chips: list[Chip]` → ogni Runner può avere innestati al massimo **3 chip**
+
+**Property**
+
+- `integrity`: vincolata (*clamp*) fra `0` e `max_integrity`
+- `max_integrity`: immutabile
+- `power` / `finesse`: **valori base** (1–20); i buff si sommano in **lettura**, non vengono scritti sui valori base
+- `icebreaker`: `Icebreaker | None`
+- (getter) `effective_power`, `effective_finesse`: restituiscono le statistiche sommando i buff attivi. Questi valori non sono mai *memorizzati*, ma calcolati al volo (*on-the-fly* / *computed*)
+- (getter + setter) `chips`: lista modificabile ma **verificata** (solo oggetti `Chip`, da controllare con `isinstance()`), massimo 3 chip in inventario
+
+**Metodi pubblici**
+
+- `equip(icebreaker)` della Parte 2 deve diventare il **setter** di `icebreaker` (annotazione `@icebreaker.setter`)
+- `attack(enemy: "Runner") -> int`
+- `is_alive() -> bool`
+- `heal(amount: int) -> int`: ripristina integrità di un certo ammontare. Ricorda che l’integrità non può mai superare `max_integrity`
+- `add_buff(stat: str, amount: int, duration: int) -> None`: applica un potenziamento a una statistica (`power` o `finesse`) per una certa durata
+- `tick_buffs() -> None`: decrementa la durata dei buff e rimuove quelli scaduti
+- `use_chip(c: "Chip") -> dict`: innesta il chip e lo rimuove dall’inventario
+- `should_use_chip(enemy: "Runner") -> "Chip | None"`: **decide autonomamente** se usare un chip prima dell’attacco (criteri liberi, da spiegare in sede di interrogazione)
+
+**Metodi privati (suggeriti)**
+
+- `__take(damage: int) -> int`: l’incasso del danno può diventare privato
+- `__calculate_damage() -> int`: danno base dell’icebreaker + modificatore, tenendo conto delle statistiche **effettive** (quindi dei buff attivi)
+- `__clamp_integrity() -> None`
+
+> **Setup iniziale dei chip** (in `__init__` o nel `main`): ogni Runner parte con 3 chip:
+>
+> - 2× `Chip("Nano-Repair Chip", "repair", amount=10)`
+> - 1× «boost del tratto principale»: se `power ≥ finesse` → `Chip("Overclock Chip", "overclock", amount=2, duration=3)`, altrimenti `Chip("Sandevistan Chip", "sharpen", amount=2, duration=3)`
+
+---
+
+### `Icebreaker` (refactor in `icebreaker.py`)
+
+- `@property` + validazioni coerenti:
+    - `min_damage ≥ 1`, `max_damage ≥ min_damage`, `type in {"fracter", "decoder"}`
+- Nessuna stampa in questa classe.
+
+---
+
+## Flusso della simulazione (`main.py`)
+
+1. Istanzia due `Runner` con statistiche casuali e un icebreaker coerente (come nella Parte 1).
+2. Assegna **3 chip** a ciascun Runner (regola del setup qui sopra).
+3. **Loop dei turni** (finché entrambi sono vivi). Per il Runner attivo:
+    - `chip = runnerX.should_use_chip(runnerY)` → **nessun input dall’utente**, la decisione è interna;
+    - se `chip` non è `None`: `log = runnerX.use_chip(chip)` (stampa un log leggibile);
+    - poi `dmg = runnerX.attack(runnerY)` (stampa il risultato).
+4. Alla fine del turno di entrambi, fase di *clean-up* in cui aggiorni i buff di tutti e due i Runner: `runnerX.tick_buffs()` e `runnerY.tick_buffs()`.
+5. Dichiara vincitore o pareggio (come nelle Parti 1 e 2).
+
+---
+
+## `should_use_chip()` — guida alla progettazione (criteri a scelta)
+
+La funzione **deve**:
+
+- osservare lo **stato interno** (integrità, buff attivi, chip rimasti, icebreaker) e lo **stato del nemico** (integrità, icebreaker, ecc.);
+- **restituire** un `Chip` da usare **oppure** `None`.
+
+**Esempi non vincolanti**
+
+- **Tecnico prudente**: usa un `repair` se l’integrità è sotto una certa soglia, o se il danno medio atteso dal nemico è ≥ all’integrità rimasta.
+- **Boost early**: se non hai buff attivi e ne hai uno disponibile, usalo al **primo turno**, o quando l’avversario è ancora sopra il 60% di integrità.
+- **Gestione scorte**: evita gli sprechi (es. non bruciare il secondo `repair` se l’avversario è a un colpo dalla disconnessione).
+- **Coerenza con l’icebreaker**: `fracter` → priorità a `power`; `decoder` → priorità a `finesse`.
+
+> **Processo > prodotto**: spiega la logica nella relazione e mostra, con stampe mirate o piccoli test, i casi limite che hai considerato. La strategia la decidi tu — non farti suggerire la soluzione dall’IA, altrimenti in interrogazione si vede.
+>
+
+---
+
+## Guida operativa (passi consigliati)
+
+1. **Refactor** di `Icebreaker` e `Runner` con `@property` e metodi privati (parti dai getter/setter della Parte 2 e convertili).
+2. Implementa una `Chip` minimale e prova `use_chip()` su un Runner fittizio.
+3. Aggiungi `effective_power` / `effective_finesse` e `tick_buffs()`.
+4. Implementa una prima versione semplice di `should_use_chip()` (es. integrità < 30% → `repair`; altrimenti boost se nessun buff attivo).
+5. Scrivi 2–3 **casi di test** rapidi (anche solo nel `main`).
+6. Affina i criteri e **commenta** le scelte.
+
+---
+
+## Esempio di output (estratto)
+
+```
+=== TURNO 1 ===
+armitage innesta il chip: Nano-Repair Chip (+10 integrity) -> armitage (Integrity: 45/50)
+armitage attacca molly [fracter, POWER eff=18]: infligge 12 danni
+molly (Integrity: 33/45)
+
+=== TURNO 2 ===
+molly innesta il chip: Sandevistan Chip (+2 FINESSE x3t)
+molly attacca armitage [decoder, FINESSE eff=17]: infligge 9 danni
+armitage (Integrity: 36/50)
+
+=== FINE TURNO: tick buff ===
+Buff attivi: molly FINESSE+2 (2 turni rimanenti)
+```
+
+---
+
+## Test automatici
+
+In allegato trovi due file pytest che verificano la parte **deterministica** del progetto — quella con una sola risposta giusta:
+
+- `test_code_combat_basic.py` — struttura (`chip.py`, `runner.py`, `icebreaker.py`), attributi privati di `Chip`, property, `__str__`, le statistiche calcolate `effective_power`/`effective_finesse`, il setter di `icebreaker`, l’interfaccia di duck typing del `Runner`
+- `test_code_combat_advanced.py` — validazione delle property di `Chip`, il ciclo di vita di `apply_to` (successo via duck typing, chip già bruciato, target non supportato), la mappatura effetto → statistica, il *clamp* dell’integrità, l’immutabilità di `max_integrity`, il setter `chips` (solo `Chip`, massimo 3), `use_chip` e la scadenza dei buff con `tick_buffs`
+
+test_code_combat_basic.py
+
+test_code_combat_advanced.py
+
+Esecuzione, dalla cartella del progetto:
+
+```bash
+pytest -v test_code_combat_basic.py
+pytest -v test_code_combat_advanced.py
+```
+
+Una nota importante su `should_use_chip()`: i test verificano **solo il contratto** (che restituisca un `Chip` del tuo inventario oppure `None`, e che non consumi nulla — quello è compito di `use_chip()`). La **strategia** dentro `should_use_chip()` *non* è testata da pytest: non esiste una mossa giusta universale, e quei test ti darebbero una falsa sicurezza. La qualità della tua logica decisionale si valuta sulla relazione e in interrogazione. I 2–3 test rapidi del passo 5 della guida operativa servono a *te*, per convincerti che i tuoi criteri si comportano come pensi sui casi limite.
+
+---
+
+## Suggerimenti
+
+- Per la sintassi dei tipi con la barra verticale (`Chip | None`) non serve importare nulla con Python 3.10 o superiore. Nelle versioni precedenti devi usare `from typing import Optional` e scrivere `Optional[Chip]`.
+- Per verificare che un oggetto sia davvero un’istanza di `Chip` usa:
+
+    ```python
+    isinstance(c, Chip)
+    ```
+
+    Non usare `type(c) == Chip`: non riconosce eventuali sottoclassi (sarà più chiaro più avanti).
+
+- Dentro la classe puoi leggere direttamente l’attributo privato (`self.__integrity`): non devi passare dalla property. Sei in casa, hai le chiavi.
+- Il setter `chips` deve **rifiutare** sia gli oggetti che non sono `Chip` sia l’inserimento oltre il terzo chip. In caso contrario l’incapsulamento appena costruito è di nuovo bucato.
