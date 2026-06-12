@@ -4,68 +4,61 @@ class Icebreaker:
 
     def __init__(self, name: str, min_damage: int, max_damage: int, type: str):
         self.__name = name
-        self.__min_damage = min_damage
-        self.__max_damage = max_damage
-        self.__type = type
+        self.__min_damage = 1
+        self.__max_damage = 1
+        self.min_damage = min_damage
+        self.max_damage = max_damage
+        self.__type = "decoder"
+        self.type = type
 
-        if not isinstance(self.__min_damage, int):
-            print("Attenzione: min_damage deve essere un intero. Corretto a 1.")
-            self.__min_damage = 1
-        elif self.__min_damage < 1:
-            print("Attenzione: min_damage deve essere >= 1. Corretto a 1.")
-            self.__min_damage = 1
-
-        if not isinstance(self.__max_damage, int):
-            print("Attenzione: max_damage deve essere un intero. Corretto a min_damage.")
-            self.__max_damage = self.__min_damage
-        elif self.__max_damage < self.__min_damage:
-            print("Attenzione: max_damage deve essere >= min_damage. Corretto.")
-            self.__max_damage = self.__min_damage
-
-        if type != "fracter" and type != "decoder":
-            print("Attenzione: type deve essere 'fracter' o 'decoder'. Corretto a 'decoder'.")
-            self.__type = "decoder"
-
-    def get_name(self) -> str:
+    @property
+    def name(self):
         return self.__name
 
-    def get_min_damage(self):
+    @property
+    def min_damage(self):
         return self.__min_damage
 
-    def get_max_damage(self):
-        return self.__max_damage
-
-    def get_type(self):
-        return self.__type
-
-    def set_min_damage(self, value: int):
+    @min_damage.setter
+    def min_damage(self, value: int):
         if not isinstance(value, int):
-            print("Attenzione: min_damage deve essere un intero.")
-            return
-        elif value < 1:
-            print("Attenzione: min_damage deve essere >= 1.")
-            return
-        elif value > self.__max_damage:
-            print("Attenzione: min_damage non può essere maggiore di max_damage.")
-            return
+            value = 1
+
+        if value < 1:
+            value = 1
+
+        if value > self.__max_damage:
+             self.__max_damage = value
 
         self.__min_damage = value
 
-    def set_max_damage(self, value: int):
+    @property
+    def max_damage(self):
+        return self.__max_damage
+
+    @max_damage.setter
+    def max_damage(self, value: int):
         if not isinstance(value, int):
-            print("Attenzione: max_damage deve essere un intero.")
-            return
-        elif value < 1:
-            print("Attenzione: max_damage deve essere >= 1.")
-            return
-        elif value < self.__min_damage:
-            print("Attenzione: max_damage non può essere minore di min_damage.")
-            return
+            value = self.__min_damage
+
+        if value < self.__min_damage:
+            value = self.__min_damage
 
         self.__max_damage = value
+
+    @property
+    def type(self):
+        return self.__type
+
+    @type.setter
+    def type(self, value: str):
+        if value in {"fracter", "decoder"}:
+            self.__type = value
+        else:
+            self.__type = "decoder"
 
     def get_damage(self) -> int:
         return random.randint(self.__min_damage, self.__max_damage)
 
     def __str__(self) -> str:
-        return f"{self.__name} {self.__type.capitalize()} ({self.__min_damage}–{self.__max_damage} dmg)"
+        return f"{self.__name} {self.__type.capitalize()} ({self.__min_damage}-{self.__max_damage} dmg)"
